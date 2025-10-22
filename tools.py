@@ -1,24 +1,27 @@
 # tools.py
-from fastapi import FastAPI, Body
-import requests, os
+import os, httpx
+from llama_index.core.tools import FunctionTool
 
-# 1) Spin-up a dummy Jira-like microservice so the demo is 100% local
-app = FastAPI()
-TICKETS = []
+# Web fetch (super simple)
+def web_fetch(url: str) -> str:
+    r = httpx.get(url, timeout=20)
+    r.raise_for_status()
+    return r.text[:4000]  # keep it short for tokens
 
-@app.post("/tickets")
-def create_ticket(summary: str = Body(...), description: str = Body(...)):
-    ticket = {"id": len(TICKETS)+1, "summary": summary, "description": description}
-    TICKETS.append(ticket)
-    return ticket
+web_fetch_tool = FunctionTool.from_defaults(
+    fn=web_fetch, name="web_fetch", description="Fetch raw HTML/text from a URL."
+)
 
-# 2) LlamaIndex Tool wrapper
-from llama_index.tools import FunctionTool
+# Policy Agent (your running FastAPI)
+def policy_check(text: str, policy: str|None=None) -> str:
+    base = os.getenv("POLICY_API_BASE", "http://127.0.0.1:8000")
+    r = httpx.post(f"{base}/evaluate", json={"text": text, "policy": policy}, timeout=30)
+    r.raise_for_status()
+    data = r.json()
+    allowed = "Allowed" if data.get("allowed") else "Blocked"
+    return f"{allowed}: {data.get('reason')}"
 
-def raise_ticket(summary: str, description: str) -> str:
-    """Create an HR policy update ticket and return ticket id"""
-    resp = requests.post("http://localhost:8001/tickets", json={"summary": summary, "description": description})
-    resp.raise_for_status()
-    return f"Ticket #{resp.json()['id']} created"
-
-RaiseTicketTool = FunctionTool.from_defaults(fn=raise_ticket, name="RaiseTicketTool")
+policy_tool = FunctionTool.from_defaults(
+    fn=policy_check, name="policy_check",
+    description="Evaluate text against a policy using the Policy Agent API."
+)
