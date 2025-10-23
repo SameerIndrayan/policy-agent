@@ -1,51 +1,59 @@
 # rag_setup.py
 import os
-from dotenv import load_dotenv
-import weaviate
-from llama_index.core import VectorStoreIndex, StorageContext, Settings, Document
-from llama_index.vector_stores.weaviate import WeaviateVectorStore
-from llm_setup import make_llm, make_embed
 from urllib.parse import urlparse
-from llama_index.core import VectorStoreIndex, StorageContext, Document
-from llama_index.vector_stores.weaviate import WeaviateVectorStore
+
 import weaviate
+from llama_index.core import Document, StorageContext, VectorStoreIndex, Settings
+from llama_index.vector_stores.weaviate import WeaviateVectorStore
+from llama_index.embeddings.openai import OpenAIEmbedding
+from llama_index.llms.openai import OpenAI
 
-load_dotenv()
 
-def make_weaviate_client() -> weaviate.WeaviateClient:
-    url = os.getenv("WEAVIATE_URL", "http://localhost:8080")
-    u = urlparse(url)
-    http_secure = (u.scheme == "https")
-    http_host = u.hostname or "localhost"
-    http_port = u.port or (443 if http_secure else 8080)
+WEAVIATE_URL = os.getenv("WEAVIATE_URL", "http://localhost:8080")
+WEAVIATE_INDEX = os.getenv("WEAVIATE_INDEX", "HackathonDocs")
 
-    # If you didn’t expose gRPC, we’ll still pass defaults; most basic ops work over HTTP.
-    grpc_host = http_host
-    grpc_port = int(os.getenv("WEAVIATE_GRPC_PORT", "50051"))
-    grpc_secure = http_secure
 
-    return weaviate.connect_to_custom(
-        http_host=http_host,
-        http_port=http_port,
-        http_secure=http_secure,
-        grpc_host=grpc_host,
-        grpc_port=grpc_port,
-        grpc_secure=grpc_secure,
+def make_weaviate_client():
+    """
+    Weaviate **v3** client (you have 3.26.7 in this venv).
+    """
+    u = urlparse(WEAVIATE_URL)
+    # v3 uses weaviate.Client(url=...) — no grpc args
+    return weaviate.Client(url=f"{u.scheme}://{u.hostname}:{u.port or 8080}")
+
+
+def _vector_store():
+    client = make_weaviate_client()
+    return WeaviateVectorStore(
+        weaviate_client=client,
+        index_name=WEAVIATE_INDEX,
     )
 
 
-def make_rag_index() -> VectorStoreIndex:
-    client = make_weaviate_client()
-    vs = WeaviateVectorStore(weaviate_client=client, index_name="HackathonDocs")
-    # ✅ create a handle backed by the existing Weaviate class
-    return VectorStoreIndex.from_vector_store(vs)
+def make_rag_index():
+    """
+    Reconnects to the existing Weaviate collection and builds a VectorStoreIndex on top.
+    """
+    # LlamaIndex 0.10.x needs explicit defaults
+    Settings.llm = OpenAI(model="gpt-4o")  # or gpt-4o-mini if your 0.10 build supports it
+    Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
 
-def ingest_texts(texts: list[str]) -> None:
-    client = make_weaviate_client()
-    try:
-        vs = WeaviateVectorStore(weaviate_client=client, index_name="HackathonDocs")
-        storage_context = StorageContext.from_defaults(vector_store=vs)
-        docs = [Document(text=t) for t in texts]
-        VectorStoreIndex.from_documents(docs, storage_context=storage_context, show_progress=False)
-    finally:
-        client.close()  # avoids the “connection not closed” warning
+    vs = _vector_store()
+    storage_context = StorageContext.from_defaults(vector_store=vs)
+
+    # empty docs here: we’re just attaching to the existing store
+    return VectorStoreIndex.from_documents([], storage_context=storage_context)
+
+
+def ingest_texts(texts):
+    """
+    Create/attach the Weaviate collection and ingest raw strings.
+    """
+    Settings.embed_model = OpenAIEmbedding(model="text-embedding-3-small")
+
+    vs = _vector_store()
+    storage_context = StorageContext.from_defaults(vector_store=vs)
+
+    docs = [Document(text=t) for t in texts]  # <-- correct ctor is Document(text=...)
+    # In 0.10.x, insertion happens during index construction:
+    VectorStoreIndex.from_documents(docs, storage_context=storage_context)

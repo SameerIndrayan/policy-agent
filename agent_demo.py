@@ -1,58 +1,58 @@
-# agent_demo.py
+# agent_demo.py  (llama-index==0.10.55 style)
 import os
-import httpx
-
-from llama_index.core import VectorStoreIndex
+from llama_index.core.agent import ReActAgentWorker, AgentRunner
 from llama_index.core.tools import FunctionTool
+from llama_index.core import Settings
 from llama_index.llms.openai import OpenAI
-from llama_index.core.agent.react import ReActAgentWorker
-from llama_index.core.agent.runner import AgentRunner
-from llama_index.core.tools import FunctionTool
+from llama_index.core import Settings
 
 
+# optional: set your LLM via env (OPENAI_API_KEY) or use default
+# Settings.llm stays default if you don't set one.
+Settings.llm = OpenAI(model="gpt-4o")  # model name can be anything your endpoint understands
 
-from rag_setup import make_rag_index
+# Try to use your Weaviate-backed RAG query engine if available
+rag_tool = None
+try:
+    from rag_setup import make_rag_index
+    idx = make_rag_index()
+    qe = idx.as_query_engine(similarity_top_k=3)
 
-# --- LLM (OpenAI-compatible; works with Friendli if you set OPENAI_BASE_URL + OPENAI_API_KEY) ---
-llm = OpenAI(
-    model=os.getenv("OPENAI_MODEL", "gpt-4o-mini"),
-    api_base=os.getenv("OPENAI_BASE_URL"),   # e.g. https://inference.friendli.ai/v1
-    api_key=os.getenv("OPENAI_API_KEY"),
+    def ask_docs(question: str) -> str:
+        """Query the vector store for relevant context."""
+        return qe.query(question).response
+
+    rag_tool = FunctionTool.from_defaults(
+        fn=ask_docs,
+        name="ask_docs",
+        description="Answer questions using the RAG index (Weaviate + LlamaIndex).",
+    )
+except Exception as e:
+    print("[agent_demo] RAG tool not available, falling back to math tool:", e)
+
+# Simple fallback tool so the agent can still act even if RAG isn’t up
+def multiply(a: float, b: float) -> float:
+    """Multiply two numbers."""
+    return a * b
+
+math_tool = FunctionTool.from_defaults(
+    fn=multiply,
+    name="multiply",
+    description="Multiply two numbers (a*b).",
 )
 
-# --- Tool: call your local FastAPI policy evaluator ---
-def evaluate_text(text: str, policy: str | None = None) -> dict:
-    """Call the /evaluate endpoint of the local policy service."""
-    url = os.getenv("POLICY_API", "http://127.0.0.1:8000/evaluate")
-    with httpx.Client(timeout=10.0) as client:
-        r = client.post(url, json={"text": text, "policy": policy})
-        r.raise_for_status()
-        return r.json()
+tools = [math_tool] if rag_tool is None else [rag_tool, math_tool]
 
-evaluate_tool = FunctionTool.from_defaults(
-    fn=evaluate_text,
-    name="evaluate_text",
-    description="Evaluate a string against a policy. Args: text (str), policy (str or null).",
-)
-
-# --- RAG retriever from your Weaviate-backed index ---
-idx: VectorStoreIndex = make_rag_index()
-retriever = idx.as_retriever(similarity_top_k=3)
-
-# --- Agent (new API in LlamaIndex 0.14.x) ---
+# Build the ReAct agent
 worker = ReActAgentWorker.from_tools(
-    tools=[evaluate_tool],
-    llm=llm,
+    tools=tools,
     verbose=True,
-    context=(
-        "You are a helpful assistant. Use the retriever for context and call "
-        "'evaluate_text' to check policy compliance when asked."
-    ),
-    retriever=retriever,
 )
 agent = AgentRunner(worker)
 
-if __name__ == "__main__":
-    q = "Draft a one-liner about Weaviate's role, then check it against the 'forbidden' policy."
-    resp = agent.query(q)
-    print("\n--- AGENT ANSWER ---\n", resp.response)
+# Demo queries
+print("---- Demo 1: math tool ----")
+print(agent.query("What is 7 * 6?"))
+
+print("\n---- Demo 2: RAG tool (if available) ----")
+print(agent.query("What role does Weaviate play in this system?"))
